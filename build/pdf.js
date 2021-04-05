@@ -335,8 +335,8 @@ var _text_layer = __w_pdfjs_require__(20);
 
 var _svg = __w_pdfjs_require__(21);
 
-const pdfjsVersion = '2.6.347';
-const pdfjsBuild = '3be9c65f';
+const pdfjsVersion = '2.6.348';
+const pdfjsBuild = '750567c41';
 {
   const {
     isNodeJS
@@ -1979,7 +1979,7 @@ function _fetchDocument(worker, source, pdfDataRangeTransport, docId) {
 
   return worker.messageHandler.sendWithPromise("GetDocRequest", {
     docId,
-    apiVersion: '2.6.347',
+    apiVersion: '2.6.348',
     source: {
       data: source.data,
       url: source.url,
@@ -3924,9 +3924,9 @@ const InternalRenderTask = function InternalRenderTaskClosure() {
   return InternalRenderTask;
 }();
 
-const version = '2.6.347';
+const version = '2.6.348';
 exports.version = version;
-const build = '3be9c65f';
+const build = '750567c41';
 exports.build = build;
 
 /***/ }),
@@ -10340,18 +10340,73 @@ var _util = __w_pdfjs_require__(2);
 
 var renderTextLayer = function renderTextLayerClosure() {
   var MAX_TEXT_DIVS_TO_RENDER = 100000;
-  var NonWhitespaceRegexp = /\S/;
+  var DEFAULT_FONT_SIZE = 30;
+  var DEFAULT_FONT_ASCENT = 0.8;
+  var ascentCache = new Map();
 
-  function isAllWhitespace(str) {
-    return !NonWhitespaceRegexp.test(str);
+  function getAscent(fontFamily, ctx) {
+    const cachedAscent = ascentCache.get(fontFamily);
+
+    if (cachedAscent) {
+      return cachedAscent;
+    }
+
+    ctx.save();
+    ctx.font = `${DEFAULT_FONT_SIZE}px ${fontFamily}`;
+    const metrics = ctx.measureText("");
+    let ascent = metrics.fontBoundingBoxAscent;
+    let descent = Math.abs(metrics.fontBoundingBoxDescent);
+
+    if (ascent) {
+      ctx.restore();
+      const ratio = ascent / (ascent + descent);
+      ascentCache.set(fontFamily, ratio);
+      return ratio;
+    }
+
+    ctx.strokeStyle = "red";
+    ctx.clearRect(0, 0, DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE);
+    ctx.strokeText("g", 0, 0);
+    let pixels = ctx.getImageData(0, 0, DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE).data;
+    descent = 0;
+
+    for (let i = pixels.length - 1 - 3; i >= 0; i -= 4) {
+      if (pixels[i] > 0) {
+        descent = Math.ceil(i / 4 / DEFAULT_FONT_SIZE);
+        break;
+      }
+    }
+
+    ctx.clearRect(0, 0, DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE);
+    ctx.strokeText("A", 0, DEFAULT_FONT_SIZE);
+    pixels = ctx.getImageData(0, 0, DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE).data;
+    ascent = 0;
+
+    for (let i = 0, ii = pixels.length; i < ii; i += 4) {
+      if (pixels[i] > 0) {
+        ascent = DEFAULT_FONT_SIZE - Math.floor(i / 4 / DEFAULT_FONT_SIZE);
+        break;
+      }
+    }
+
+    ctx.restore();
+
+    if (ascent) {
+      const ratio = ascent / (ascent + descent);
+      ascentCache.set(fontFamily, ratio);
+      return ratio;
+    }
+
+    ascentCache.set(fontFamily, DEFAULT_FONT_ASCENT);
+    return DEFAULT_FONT_ASCENT;
   }
 
-  function appendText(task, geom, styles) {
+  function appendText(task, geom, styles, ctx) {
     var textDiv = document.createElement("span");
     var textDivProperties = {
       angle: 0,
       canvasWidth: 0,
-      isWhitespace: false,
+      hasEOL: geom.hasEOL,
       originalTransform: null,
       paddingBottom: 0,
       paddingLeft: 0,
@@ -10359,16 +10414,9 @@ var renderTextLayer = function renderTextLayerClosure() {
       paddingTop: 0,
       scale: 1
     };
+    textDiv.textContent = geom.str;
 
     task._textDivs.push(textDiv);
-
-    if (isAllWhitespace(geom.str)) {
-      textDivProperties.isWhitespace = true;
-
-      task._textDivProperties.set(textDiv, textDivProperties);
-
-      return;
-    }
 
     var tx = _util.Util.transform(task._viewport.transform, geom.transform);
 
@@ -10379,15 +10427,8 @@ var renderTextLayer = function renderTextLayerClosure() {
       angle += Math.PI / 2;
     }
 
-    var fontHeight = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
-    var fontAscent = fontHeight;
-
-    if (style.ascent) {
-      fontAscent = style.ascent * fontAscent;
-    } else if (style.descent) {
-      fontAscent = (1 + style.descent) * fontAscent;
-    }
-
+    var fontHeight = Math.hypot(tx[2], tx[3]);
+    var fontAscent = fontHeight * getAscent(style.fontFamily, ctx);
     let left, top;
 
     if (angle === 0) {
@@ -10402,7 +10443,7 @@ var renderTextLayer = function renderTextLayerClosure() {
     textDiv.style.top = `${top}px`;
     textDiv.style.fontSize = `${fontHeight}px`;
     textDiv.style.fontFamily = style.fontFamily;
-    textDiv.textContent = geom.str;
+    textDiv.dir = geom.dir;
 
     if (task._fontInspectorEnabled) {
       textDiv.dataset.fontName = geom.fontName;
@@ -10414,7 +10455,7 @@ var renderTextLayer = function renderTextLayerClosure() {
 
     let shouldScaleText = false;
 
-    if (geom.str.length > 1) {
+    if (geom.str.length > 1 || geom.isSpace) {
       shouldScaleText = true;
     } else if (geom.transform[0] !== geom.transform[3]) {
       const absScaleX = Math.abs(geom.transform[0]),
@@ -10440,7 +10481,7 @@ var renderTextLayer = function renderTextLayerClosure() {
     }
 
     if (task._enhanceTextSelection) {
-      var angleCos = 1,
+      let angleCos = 1,
           angleSin = 0;
 
       if (angle !== 0) {
@@ -10448,9 +10489,9 @@ var renderTextLayer = function renderTextLayerClosure() {
         angleSin = Math.sin(angle);
       }
 
-      var divWidth = (style.vertical ? geom.height : geom.width) * task._viewport.scale;
-      var divHeight = fontHeight;
-      var m, b;
+      const divWidth = (style.vertical ? geom.height : geom.width) * task._viewport.scale;
+      const divHeight = fontHeight;
+      let m, b;
 
       if (angle !== 0) {
         m = [angleCos, angleSin, -angleSin, angleCos, left, top];
@@ -10476,9 +10517,9 @@ var renderTextLayer = function renderTextLayerClosure() {
       return;
     }
 
-    var textDivs = task._textDivs;
-    var capability = task._capability;
-    var textDivsLength = textDivs.length;
+    const textDivs = task._textDivs;
+    const capability = task._capability;
+    const textDivsLength = textDivs.length;
 
     if (textDivsLength > MAX_TEXT_DIVS_TO_RENDER) {
       task._renderingDone = true;
@@ -10487,7 +10528,7 @@ var renderTextLayer = function renderTextLayerClosure() {
     }
 
     if (!task._textContentStream) {
-      for (var i = 0; i < textDivsLength; i++) {
+      for (let i = 0; i < textDivsLength; i++) {
         task._layoutText(textDivs[i]);
       }
     }
@@ -10824,16 +10865,12 @@ var renderTextLayer = function renderTextLayerClosure() {
       for (let i = 0, len = items.length; i < len; i++) {
         this._textContentItemsStr.push(items[i].str);
 
-        appendText(this, items[i], styleCache);
+        appendText(this, items[i], styleCache, this._layoutTextCtx);
       }
     },
 
     _layoutText(textDiv) {
       const textDivProperties = this._textDivProperties.get(textDiv);
-
-      if (textDivProperties.isWhitespace) {
-        return;
-      }
 
       let transform = "";
 
@@ -10871,9 +10908,11 @@ var renderTextLayer = function renderTextLayerClosure() {
         textDiv.style.transform = transform;
       }
 
-      this._textDivProperties.set(textDiv, textDivProperties);
-
       this._container.appendChild(textDiv);
+
+      if (textDivProperties.hasEOL) {
+        textDiv.appendChild(document.createElement("br"));
+      }
     },
 
     _render: function TextLayer_render(timeout) {
@@ -10882,6 +10921,7 @@ var renderTextLayer = function renderTextLayerClosure() {
 
       const canvas = this._document.createElement("canvas");
 
+      canvas.height = canvas.width = DEFAULT_FONT_SIZE;
       canvas.mozOpaque = true;
       this._layoutTextCtx = canvas.getContext("2d", {
         alpha: false
@@ -10949,10 +10989,6 @@ var renderTextLayer = function renderTextLayerClosure() {
         const div = this._textDivs[i];
 
         const divProps = this._textDivProperties.get(div);
-
-        if (divProps.isWhitespace) {
-          continue;
-        }
 
         if (expandDivs) {
           transformBuf.length = 0;

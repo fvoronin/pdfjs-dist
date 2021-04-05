@@ -165,8 +165,8 @@ var _jpg = __w_pdfjs_require__(8);
 
 var _jpx = __w_pdfjs_require__(9);
 
-const pdfjsVersion = '2.6.347';
-const pdfjsBuild = '3be9c65f';
+const pdfjsVersion = '2.6.348';
+const pdfjsBuild = '750567c41';
 
 /***/ }),
 /* 1 */

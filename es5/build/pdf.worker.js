@@ -135,8 +135,8 @@ Object.defineProperty(exports, "WorkerMessageHandler", {
 
 var _worker = __w_pdfjs_require__(1);
 
-var pdfjsVersion = '2.6.347';
-var pdfjsBuild = '3be9c65f';
+var pdfjsVersion = '2.6.348';
+var pdfjsBuild = '750567c41';
 
 /***/ }),
 /* 1 */
@@ -279,7 +279,7 @@ var WorkerMessageHandler = /*#__PURE__*/function () {
       var WorkerTasks = [];
       var verbosity = (0, _util.getVerbosityLevel)();
       var apiVersion = docParams.apiVersion;
-      var workerVersion = '2.6.347';
+      var workerVersion = '2.6.348';
 
       if (apiVersion !== workerVersion) {
         throw new Error("The API version \"".concat(apiVersion, "\" does not match ") + "the Worker version \"".concat(workerVersion, "\"."));
@@ -36086,6 +36086,7 @@ var PartialEvaluator = /*#__PURE__*/function () {
       resources = resources || _primitives.Dict.empty;
       stateManager = stateManager || new StateManager(new TextState());
       var WhitespaceRegexp = /\s/g;
+      var AllWhitespaceRegexp = /^\s+$/g;
       var textContent = {
         items: [],
         styles: Object.create(null)
@@ -36096,27 +36097,45 @@ var PartialEvaluator = /*#__PURE__*/function () {
         width: 0,
         height: 0,
         vertical: false,
+        lastCharSize: 0,
         lastAdvanceWidth: 0,
         lastAdvanceHeight: 0,
         textAdvanceScale: 0,
         spaceWidth: 0,
-        fakeSpaceMin: Infinity,
-        fakeMultiSpaceMin: Infinity,
-        fakeMultiSpaceMax: -0,
-        textRunBreakAllowed: false,
+        spaceInFlowMin: 0,
+        spaceInFlowMax: 0,
+        trackingSpaceMin: Infinity,
         transform: null,
-        fontName: null
+        fontName: null,
+        isSpace: false,
+        hasEOL: false
       };
-      var SPACE_FACTOR = 0.3;
-      var MULTI_SPACE_FACTOR = 1.5;
-      var MULTI_SPACE_FACTOR_MAX = 4;
+      var TRACKING_SPACE_FACTOR = 0.3;
+      var SPACE_IN_FLOW_MIN_FACTOR = 0.3;
+      var SPACE_IN_FLOW_MAX_FACTOR = 1.1;
       var self = this;
       var xref = this.xref;
+      var showSpacedTextBuffer = [];
       var xobjs = null;
       var emptyXObjectCache = new _image_utils.LocalImageCache();
       var emptyGStateCache = new _image_utils.LocalGStateCache();
       var preprocessor = new EvaluatorPreprocessor(stream, xref, stateManager);
       var textState;
+
+      function getCurrentTextTransform() {
+        var font = textState.font;
+        var tsm = [textState.fontSize * textState.textHScale, 0, 0, textState.fontSize, 0, textState.textRise];
+
+        if (font.isType3Font && textState.fontSize <= 1 && !(0, _util.isArrayEqual)(textState.fontMatrix, _util.FONT_IDENTITY_MATRIX)) {
+          var glyphHeight = font.bbox[3] - font.bbox[1];
+
+          if (glyphHeight > 0) {
+            tsm[3] *= glyphHeight * textState.fontMatrix[3];
+          }
+        }
+
+        return _util.Util.transform(textState.ctm, _util.Util.transform(textState.textMatrix, tsm));
+      }
 
       function ensureTextContentItem() {
         if (textContentItem.initialized) {
@@ -36136,19 +36155,7 @@ var PartialEvaluator = /*#__PURE__*/function () {
         }
 
         textContentItem.fontName = font.loadedName;
-        var tsm = [textState.fontSize * textState.textHScale, 0, 0, textState.fontSize, 0, textState.textRise];
-
-        if (font.isType3Font && textState.fontSize <= 1 && !(0, _util.isArrayEqual)(textState.fontMatrix, _util.FONT_IDENTITY_MATRIX)) {
-          var glyphHeight = font.bbox[3] - font.bbox[1];
-
-          if (glyphHeight > 0) {
-            tsm[3] *= glyphHeight * textState.fontMatrix[3];
-          }
-        }
-
-        var trm = _util.Util.transform(textState.ctm, _util.Util.transform(textState.textMatrix, tsm));
-
-        textContentItem.transform = trm;
+        var trm = textContentItem.transform = getCurrentTextTransform();
 
         if (!font.vertical) {
           textContentItem.width = 0;
@@ -36167,24 +36174,23 @@ var PartialEvaluator = /*#__PURE__*/function () {
         b = textState.ctm[1];
         var scaleCtmX = Math.sqrt(a * a + b * b);
         textContentItem.textAdvanceScale = scaleCtmX * scaleLineX;
-        textContentItem.lastAdvanceWidth = 0;
-        textContentItem.lastAdvanceHeight = 0;
+        textContentItem.lastAdvanceWidth = textContentItem.lastAdvanceWidth || 0;
+        textContentItem.lastAdvanceHeight = textContentItem.lastAdvanceHeight || 0;
+        textContentItem.lastCharSize = textContentItem.lastCharSize || 0;
         var spaceWidth = font.spaceWidth / 1000 * textState.fontSize;
 
         if (spaceWidth) {
           textContentItem.spaceWidth = spaceWidth;
-          textContentItem.fakeSpaceMin = spaceWidth * SPACE_FACTOR;
-          textContentItem.fakeMultiSpaceMin = spaceWidth * MULTI_SPACE_FACTOR;
-          textContentItem.fakeMultiSpaceMax = spaceWidth * MULTI_SPACE_FACTOR_MAX;
-          textContentItem.textRunBreakAllowed = !font.isMonospace;
+          textContentItem.trackingSpaceMin = spaceWidth * TRACKING_SPACE_FACTOR;
+          textContentItem.spaceInFlowMin = spaceWidth * SPACE_IN_FLOW_MIN_FACTOR;
+          textContentItem.spaceInFlowMax = spaceWidth * SPACE_IN_FLOW_MAX_FACTOR;
         } else {
           textContentItem.spaceWidth = 0;
-          textContentItem.fakeSpaceMin = Infinity;
-          textContentItem.fakeMultiSpaceMin = Infinity;
-          textContentItem.fakeMultiSpaceMax = 0;
-          textContentItem.textRunBreakAllowed = false;
+          textContentItem.trackingSpaceMin = Infinity;
         }
 
+        textContentItem.isSpace = false;
+        textContentItem.hasEOL = false;
         textContentItem.initialized = true;
         return textContentItem;
       }
@@ -36202,15 +36208,18 @@ var PartialEvaluator = /*#__PURE__*/function () {
       }
 
       function runBidiTransform(textChunk) {
-        var str = textChunk.str.join("");
-        var bidiResult = (0, _bidi.bidi)(str, -1, textChunk.vertical);
+        var text = textChunk.str.join("");
+        var bidiResult = (0, _bidi.bidi)(text, -1, textChunk.vertical);
+        var str = normalizeWhitespace ? replaceWhitespace(bidiResult.str) : bidiResult.str;
         return {
-          str: normalizeWhitespace ? replaceWhitespace(bidiResult.str) : bidiResult.str,
+          str: str,
           dir: bidiResult.dir,
           width: textChunk.width,
           height: textChunk.height,
           transform: textChunk.transform,
-          fontName: textChunk.fontName
+          fontName: textChunk.fontName,
+          isSpace: AllWhitespaceRegexp.test(str),
+          hasEOL: textChunk.hasEOL
         };
       }
 
@@ -36222,88 +36231,120 @@ var PartialEvaluator = /*#__PURE__*/function () {
       }
 
       function buildTextContentItem(chars) {
+        var extraSpacing = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : 0;
         var font = textState.font;
         var textChunk = ensureTextContentItem();
-        var width = 0;
-        var height = 0;
         var glyphs = font.charsToGlyphs(chars);
+        var scale = textState.fontMatrix[0] * textState.fontSize;
+        var NormalizedUnicodes = (0, _unicode.getNormalizedUnicodes)();
+        var size = 0;
+        var lastCharSize = 0;
+        var lastAdvanceSize = 0;
 
-        for (var i = 0; i < glyphs.length; i++) {
+        for (var i = 0, ii = glyphs.length; i < ii; i++) {
           var glyph = glyphs[i];
-          var glyphWidth = null;
-
-          if (font.vertical && glyph.vmetric) {
-            glyphWidth = glyph.vmetric[0];
-          } else {
-            glyphWidth = glyph.width;
-          }
-
+          var charSpacing = textState.charSpacing + (i === ii - 1 ? extraSpacing : 0);
           var glyphUnicode = glyph.unicode;
-          var NormalizedUnicodes = (0, _unicode.getNormalizedUnicodes)();
-
-          if (NormalizedUnicodes[glyphUnicode] !== undefined) {
-            glyphUnicode = NormalizedUnicodes[glyphUnicode];
-          }
-
-          glyphUnicode = (0, _unicode.reverseIfRtl)(glyphUnicode);
-          var charSpacing = textState.charSpacing;
 
           if (glyph.isSpace) {
-            var wordSpacing = textState.wordSpacing;
-            charSpacing += wordSpacing;
+            charSpacing += textState.wordSpacing;
+          } else {
+            glyphUnicode = NormalizedUnicodes[glyphUnicode] || glyphUnicode;
+            glyphUnicode = (0, _unicode.reverseIfRtl)(glyphUnicode);
+          }
 
-            if (wordSpacing > 0) {
-              addFakeSpaces(wordSpacing, textChunk.str);
+          textChunk.str.push(glyphUnicode);
+          var glyphWidth = font.vertical && glyph.vmetric ? glyph.vmetric[0] : glyph.width;
+          var scaledDim = glyphWidth * scale;
+
+          if (!font.vertical) {
+            scaledDim *= textState.textHScale;
+            textState.translateTextMatrix(scaledDim, 0);
+          } else {
+            textState.translateTextMatrix(0, scaledDim);
+            scaledDim = Math.abs(scaledDim);
+          }
+
+          size += scaledDim;
+
+          if (charSpacing) {
+            if (!font.vertical) {
+              charSpacing *= textState.textHScale;
+            }
+
+            scaledDim += charSpacing;
+            var wasSplit = addFakeSpaces(charSpacing, size);
+
+            if (!font.vertical) {
+              textState.translateTextMatrix(charSpacing, 0);
+            } else {
+              textState.translateTextMatrix(0, charSpacing);
+            }
+
+            if (wasSplit) {
+              textChunk = ensureTextContentItem();
+              lastAdvanceSize += size + charSpacing;
+              size = 0;
+            } else {
+              size += charSpacing;
             }
           }
 
-          var tx = 0;
-          var ty = 0;
-
-          if (!font.vertical) {
-            var w0 = glyphWidth * textState.fontMatrix[0];
-            tx = (w0 * textState.fontSize + charSpacing) * textState.textHScale;
-            width += tx;
-          } else {
-            var w1 = glyphWidth * textState.fontMatrix[0];
-            ty = w1 * textState.fontSize + charSpacing;
-            height += ty;
-          }
-
-          textState.translateTextMatrix(tx, ty);
-          textChunk.str.push(glyphUnicode);
+          lastCharSize = scaledDim;
         }
+
+        lastAdvanceSize += size;
+        textChunk.lastCharSize = lastCharSize;
 
         if (!font.vertical) {
-          textChunk.lastAdvanceWidth = width;
-          textChunk.width += width;
+          textChunk.lastAdvanceWidth += lastAdvanceSize;
+          textChunk.width += size;
         } else {
-          textChunk.lastAdvanceHeight = height;
-          textChunk.height += Math.abs(height);
+          textChunk.lastAdvanceHeight += lastAdvanceSize;
+          textChunk.height += size;
         }
-
-        return textChunk;
       }
 
-      function addFakeSpaces(width, strBuf) {
-        if (width < textContentItem.fakeSpaceMin) {
-          return;
+      function addFakeSpaces(width) {
+        var size = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : 0;
+
+        if (width < textContentItem.trackingSpaceMin) {
+          return false;
         }
 
-        if (width < textContentItem.fakeMultiSpaceMin) {
-          strBuf.push(" ");
-          return;
+        if (textContentItem.spaceInFlowMin <= width && width <= textContentItem.spaceInFlowMax) {
+          textContentItem.str.push(" ");
+          return false;
         }
 
-        var fakeSpaces = Math.round(width / textContentItem.spaceWidth);
+        var fontName = textContentItem.fontName;
+        var height = 0;
 
-        while (fakeSpaces-- > 0) {
-          strBuf.push(" ");
+        if (!textContentItem.vertical) {
+          textContentItem.width += size;
+          width *= textContentItem.textAdvanceScale;
+        } else {
+          textContentItem.height += size;
+          height = width * textContentItem.textAdvanceScale;
+          width = 0;
         }
+
+        flushTextContentItem();
+        textContent.items.push({
+          str: " ",
+          dir: "ltr",
+          width: width,
+          height: height,
+          transform: getCurrentTextTransform(),
+          fontName: fontName,
+          isSpace: true,
+          hasEOL: false
+        });
+        return true;
       }
 
       function flushTextContentItem() {
-        if (!textContentItem.initialized) {
+        if (!textContentItem.initialized || !textContentItem.str) {
           return;
         }
 
@@ -36358,7 +36399,7 @@ var PartialEvaluator = /*#__PURE__*/function () {
           textState = stateManager.state;
           var fn = operation.fn;
           args = operation.args;
-          var advance, diff;
+          var advance;
 
           switch (fn | 0) {
             case _util.OPS.setFont:
@@ -36391,16 +36432,58 @@ var PartialEvaluator = /*#__PURE__*/function () {
               break;
 
             case _util.OPS.moveText:
-              var isSameTextLine = !textState.font ? false : (textState.font.vertical ? args[0] : args[1]) === 0;
-              advance = args[0] - args[1];
+              if (combineTextItems && textContentItem.initialized && textState.font) {
+                if (textState.font.vertical) {
+                  advance = args[1] - textContentItem.lastAdvanceHeight;
+                  textContentItem.lastAdvanceHeight = 0;
 
-              if (combineTextItems && isSameTextLine && textContentItem.initialized && advance > 0 && advance <= textContentItem.fakeMultiSpaceMax) {
-                textState.translateTextLineMatrix(args[0], args[1]);
-                textContentItem.width += args[0] - textContentItem.lastAdvanceWidth;
-                textContentItem.height += args[1] - textContentItem.lastAdvanceHeight;
-                diff = args[0] - textContentItem.lastAdvanceWidth - (args[1] - textContentItem.lastAdvanceHeight);
-                addFakeSpaces(diff, textContentItem.str);
-                break;
+                  if (args[0] === 0) {
+                    var HALF_LAST_CHAR = -0.5 * textContentItem.lastCharSize;
+
+                    if (HALF_LAST_CHAR <= advance) {
+                      var wasSplit = addFakeSpaces(advance);
+                      textState.translateTextLineMatrix(args[0], args[1]);
+                      textState.textMatrix = textState.textLineMatrix.slice();
+
+                      if (!wasSplit) {
+                        textContentItem.height += advance;
+                      }
+
+                      break;
+                    }
+                  } else {
+                    var TWO_CHARS_BEHIND = -2 * textContentItem.lastCharSize;
+
+                    if (advance < TWO_CHARS_BEHIND) {
+                      textContentItem.hasEOL = true;
+                    }
+                  }
+                } else {
+                  advance = args[0] - textContentItem.lastAdvanceWidth;
+                  textContentItem.lastAdvanceWidth = 0;
+
+                  if (args[1] === 0) {
+                    var HALF_LAST_CHAR = -0.5 * textContentItem.lastCharSize;
+
+                    if (HALF_LAST_CHAR <= advance) {
+                      var wasSplit = addFakeSpaces(advance);
+                      textState.translateTextLineMatrix(args[0], args[1]);
+                      textState.textMatrix = textState.textLineMatrix.slice();
+
+                      if (!wasSplit) {
+                        textContentItem.width += advance;
+                      }
+
+                      break;
+                    }
+                  } else {
+                    var TWO_CHARS_BEHIND = -2 * textContentItem.lastCharSize;
+
+                    if (advance < TWO_CHARS_BEHIND) {
+                      textContentItem.hasEOL = true;
+                    }
+                  }
+                }
               }
 
               flushTextContentItem();
@@ -36416,6 +36499,8 @@ var PartialEvaluator = /*#__PURE__*/function () {
               break;
 
             case _util.OPS.nextLine:
+              textContentItem.hasEOL = true;
+              textContentItem.lastAdvanceWidth = textContentItem.lastAdvanceHeight = 0;
               flushTextContentItem();
               textState.carriageReturn();
               break;
@@ -36423,15 +36508,26 @@ var PartialEvaluator = /*#__PURE__*/function () {
             case _util.OPS.setTextMatrix:
               advance = textState.calcTextLineMatrixAdvance(args[0], args[1], args[2], args[3], args[4], args[5]);
 
-              if (combineTextItems && advance !== null && textContentItem.initialized && advance.value > 0 && advance.value <= textContentItem.fakeMultiSpaceMax) {
+              if (combineTextItems && advance !== null && textContentItem.initialized && advance.value >= 0) {
+                var diffWidth = advance.width - textContentItem.lastAdvanceWidth;
+                var diffHeight = advance.height - textContentItem.lastAdvanceHeight;
+                textContentItem.lastAdvanceWidth = textContentItem.lastAdvanceHeight = 0;
+
+                var _wasSplit = addFakeSpaces(diffWidth - diffHeight);
+
                 textState.translateTextLineMatrix(advance.width, advance.height);
-                textContentItem.width += advance.width - textContentItem.lastAdvanceWidth;
-                textContentItem.height += advance.height - textContentItem.lastAdvanceHeight;
-                diff = advance.width - textContentItem.lastAdvanceWidth - (advance.height - textContentItem.lastAdvanceHeight);
-                addFakeSpaces(diff, textContentItem.str);
+                textState.textMatrix = textState.textLineMatrix.slice();
+
+                if (!_wasSplit) {
+                  textContentItem.width += diffWidth;
+                  textContentItem.height += diffHeight;
+                }
+
                 break;
               }
 
+              textContentItem.hasEOL = true;
+              textContentItem.lastAdvanceWidth = textContentItem.lastAdvanceHeight = 0;
               flushTextContentItem();
               textState.setTextMatrix(args[0], args[1], args[2], args[3], args[4], args[5]);
               textState.setTextLineMatrix(args[0], args[1], args[2], args[3], args[4], args[5]);
@@ -36457,42 +36553,32 @@ var PartialEvaluator = /*#__PURE__*/function () {
                 continue;
               }
 
-              var items = args[0];
-              var offset;
+              var spaceFactor = (textState.font.vertical ? 1 : -1) * textState.fontSize / 1000;
+              var elements = args[0];
 
-              for (var j = 0, jj = items.length; j < jj; j++) {
-                if (typeof items[j] === "string") {
-                  buildTextContentItem(items[j]);
-                } else if ((0, _util.isNum)(items[j])) {
-                  ensureTextContentItem();
-                  advance = items[j] * textState.fontSize / 1000;
-                  var breakTextRun = false;
+              for (var _i = 0, ii = elements.length; _i < ii - 1; _i++) {
+                var _item = elements[_i];
 
-                  if (textState.font.vertical) {
-                    offset = advance;
-                    textState.translateTextMatrix(0, offset);
-                    breakTextRun = textContentItem.textRunBreakAllowed && advance > textContentItem.fakeMultiSpaceMax;
-
-                    if (!breakTextRun) {
-                      textContentItem.height += offset;
-                    }
-                  } else {
-                    advance = -advance;
-                    offset = advance * textState.textHScale;
-                    textState.translateTextMatrix(offset, 0);
-                    breakTextRun = textContentItem.textRunBreakAllowed && advance > textContentItem.fakeMultiSpaceMax;
-
-                    if (!breakTextRun) {
-                      textContentItem.width += offset;
-                    }
-                  }
-
-                  if (breakTextRun) {
-                    flushTextContentItem();
-                  } else if (advance > 0) {
-                    addFakeSpaces(advance, textContentItem.str);
-                  }
+                if (typeof _item === "string") {
+                  showSpacedTextBuffer.push(_item);
+                } else if (typeof _item === "number" && _item !== 0) {
+                  var str = showSpacedTextBuffer.join("");
+                  showSpacedTextBuffer.length = 0;
+                  buildTextContentItem(str, _item * spaceFactor);
                 }
+              }
+
+              var item = elements[elements.length - 1];
+
+              if (typeof item === "string") {
+                showSpacedTextBuffer.push(item);
+              }
+
+              if (showSpacedTextBuffer.length > 0) {
+                var _str = showSpacedTextBuffer.join("");
+
+                showSpacedTextBuffer.length = 0;
+                buildTextContentItem(_str);
               }
 
               break;
@@ -36512,6 +36598,8 @@ var PartialEvaluator = /*#__PURE__*/function () {
                 continue;
               }
 
+              textContentItem.hasEOL = true;
+              textContentItem.lastAdvanceWidth = textContentItem.lastAdvanceHeight = 0;
               flushTextContentItem();
               textState.carriageReturn();
               buildTextContentItem(args[0]);
@@ -36523,6 +36611,8 @@ var PartialEvaluator = /*#__PURE__*/function () {
                 continue;
               }
 
+              textContentItem.hasEOL = true;
+              textContentItem.lastAdvanceWidth = textContentItem.lastAdvanceHeight = 0;
               flushTextContentItem();
               textState.wordSpacing = args[0];
               textState.charSpacing = args[1];
@@ -37369,8 +37459,8 @@ var PartialEvaluator = /*#__PURE__*/function () {
               var glyphWidths = [];
               var j = firstChar;
 
-              for (var _i = 0, ii = widths.length; _i < ii; _i++) {
-                glyphWidths[j++] = _this11.xref.fetchIfRef(widths[_i]);
+              for (var _i2 = 0, ii = widths.length; _i2 < ii; _i2++) {
+                glyphWidths[j++] = _this11.xref.fetchIfRef(widths[_i2]);
               }
 
               newProperties.widths = glyphWidths;

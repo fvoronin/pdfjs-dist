@@ -335,8 +335,8 @@ var _text_layer = __w_pdfjs_require__(217);
 
 var _svg = __w_pdfjs_require__(218);
 
-var pdfjsVersion = '2.6.347';
-var pdfjsBuild = '3be9c65f';
+var pdfjsVersion = '2.6.348';
+var pdfjsBuild = '750567c41';
 {
   var _require = __w_pdfjs_require__(7),
       isNodeJS = _require.isNodeJS;
@@ -12462,7 +12462,7 @@ function _fetchDocument(worker, source, pdfDataRangeTransport, docId) {
 
   return worker.messageHandler.sendWithPromise("GetDocRequest", {
     docId: docId,
-    apiVersion: '2.6.347',
+    apiVersion: '2.6.348',
     source: {
       data: source.data,
       url: source.url,
@@ -14792,9 +14792,9 @@ var InternalRenderTask = function InternalRenderTaskClosure() {
   return InternalRenderTask;
 }();
 
-var version = '2.6.347';
+var version = '2.6.348';
 exports.version = version;
-var build = '3be9c65f';
+var build = '750567c41';
 exports.build = build;
 
 /***/ }),
@@ -22227,18 +22227,74 @@ var _util = __w_pdfjs_require__(5);
 
 var renderTextLayer = function renderTextLayerClosure() {
   var MAX_TEXT_DIVS_TO_RENDER = 100000;
-  var NonWhitespaceRegexp = /\S/;
+  var DEFAULT_FONT_SIZE = 30;
+  var DEFAULT_FONT_ASCENT = 0.8;
+  var ascentCache = new Map();
 
-  function isAllWhitespace(str) {
-    return !NonWhitespaceRegexp.test(str);
+  function getAscent(fontFamily, ctx) {
+    var cachedAscent = ascentCache.get(fontFamily);
+
+    if (cachedAscent) {
+      return cachedAscent;
+    }
+
+    ctx.save();
+    ctx.font = "".concat(DEFAULT_FONT_SIZE, "px ").concat(fontFamily);
+    var metrics = ctx.measureText("");
+    var ascent = metrics.fontBoundingBoxAscent;
+    var descent = Math.abs(metrics.fontBoundingBoxDescent);
+
+    if (ascent) {
+      ctx.restore();
+      var ratio = ascent / (ascent + descent);
+      ascentCache.set(fontFamily, ratio);
+      return ratio;
+    }
+
+    ctx.strokeStyle = "red";
+    ctx.clearRect(0, 0, DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE);
+    ctx.strokeText("g", 0, 0);
+    var pixels = ctx.getImageData(0, 0, DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE).data;
+    descent = 0;
+
+    for (var i = pixels.length - 1 - 3; i >= 0; i -= 4) {
+      if (pixels[i] > 0) {
+        descent = Math.ceil(i / 4 / DEFAULT_FONT_SIZE);
+        break;
+      }
+    }
+
+    ctx.clearRect(0, 0, DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE);
+    ctx.strokeText("A", 0, DEFAULT_FONT_SIZE);
+    pixels = ctx.getImageData(0, 0, DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE).data;
+    ascent = 0;
+
+    for (var _i = 0, ii = pixels.length; _i < ii; _i += 4) {
+      if (pixels[_i] > 0) {
+        ascent = DEFAULT_FONT_SIZE - Math.floor(_i / 4 / DEFAULT_FONT_SIZE);
+        break;
+      }
+    }
+
+    ctx.restore();
+
+    if (ascent) {
+      var _ratio = ascent / (ascent + descent);
+
+      ascentCache.set(fontFamily, _ratio);
+      return _ratio;
+    }
+
+    ascentCache.set(fontFamily, DEFAULT_FONT_ASCENT);
+    return DEFAULT_FONT_ASCENT;
   }
 
-  function appendText(task, geom, styles) {
+  function appendText(task, geom, styles, ctx) {
     var textDiv = document.createElement("span");
     var textDivProperties = {
       angle: 0,
       canvasWidth: 0,
-      isWhitespace: false,
+      hasEOL: geom.hasEOL,
       originalTransform: null,
       paddingBottom: 0,
       paddingLeft: 0,
@@ -22246,16 +22302,9 @@ var renderTextLayer = function renderTextLayerClosure() {
       paddingTop: 0,
       scale: 1
     };
+    textDiv.textContent = geom.str;
 
     task._textDivs.push(textDiv);
-
-    if (isAllWhitespace(geom.str)) {
-      textDivProperties.isWhitespace = true;
-
-      task._textDivProperties.set(textDiv, textDivProperties);
-
-      return;
-    }
 
     var tx = _util.Util.transform(task._viewport.transform, geom.transform);
 
@@ -22266,15 +22315,8 @@ var renderTextLayer = function renderTextLayerClosure() {
       angle += Math.PI / 2;
     }
 
-    var fontHeight = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
-    var fontAscent = fontHeight;
-
-    if (style.ascent) {
-      fontAscent = style.ascent * fontAscent;
-    } else if (style.descent) {
-      fontAscent = (1 + style.descent) * fontAscent;
-    }
-
+    var fontHeight = Math.hypot(tx[2], tx[3]);
+    var fontAscent = fontHeight * getAscent(style.fontFamily, ctx);
     var left, top;
 
     if (angle === 0) {
@@ -22289,7 +22331,7 @@ var renderTextLayer = function renderTextLayerClosure() {
     textDiv.style.top = "".concat(top, "px");
     textDiv.style.fontSize = "".concat(fontHeight, "px");
     textDiv.style.fontFamily = style.fontFamily;
-    textDiv.textContent = geom.str;
+    textDiv.dir = geom.dir;
 
     if (task._fontInspectorEnabled) {
       textDiv.dataset.fontName = geom.fontName;
@@ -22301,7 +22343,7 @@ var renderTextLayer = function renderTextLayerClosure() {
 
     var shouldScaleText = false;
 
-    if (geom.str.length > 1) {
+    if (geom.str.length > 1 || geom.isSpace) {
       shouldScaleText = true;
     } else if (geom.transform[0] !== geom.transform[3]) {
       var absScaleX = Math.abs(geom.transform[0]),
@@ -22711,15 +22753,11 @@ var renderTextLayer = function renderTextLayerClosure() {
       for (var i = 0, len = items.length; i < len; i++) {
         this._textContentItemsStr.push(items[i].str);
 
-        appendText(this, items[i], styleCache);
+        appendText(this, items[i], styleCache, this._layoutTextCtx);
       }
     },
     _layoutText: function _layoutText(textDiv) {
       var textDivProperties = this._textDivProperties.get(textDiv);
-
-      if (textDivProperties.isWhitespace) {
-        return;
-      }
 
       var transform = "";
 
@@ -22755,9 +22793,11 @@ var renderTextLayer = function renderTextLayerClosure() {
         textDiv.style.transform = transform;
       }
 
-      this._textDivProperties.set(textDiv, textDivProperties);
-
       this._container.appendChild(textDiv);
+
+      if (textDivProperties.hasEOL) {
+        textDiv.appendChild(document.createElement("br"));
+      }
     },
     _render: function TextLayer_render(timeout) {
       var _this2 = this;
@@ -22767,6 +22807,7 @@ var renderTextLayer = function renderTextLayerClosure() {
 
       var canvas = this._document.createElement("canvas");
 
+      canvas.height = canvas.width = DEFAULT_FONT_SIZE;
       canvas.mozOpaque = true;
       this._layoutTextCtx = canvas.getContext("2d", {
         alpha: false
@@ -22834,10 +22875,6 @@ var renderTextLayer = function renderTextLayerClosure() {
         var div = this._textDivs[i];
 
         var divProps = this._textDivProperties.get(div);
-
-        if (divProps.isWhitespace) {
-          continue;
-        }
 
         if (expandDivs) {
           transformBuf.length = 0;
